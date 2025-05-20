@@ -1,9 +1,10 @@
 import uuid
 from datetime import datetime
 import sys
+import os
 
-STATUS_ACTIVE = "active"
-STATUS_DONE = "done"
+STATUS_ACTIVE = "✕"
+STATUS_DONE = "✓"
 SEPARATOR = "<>"
 DB_FILE_PATH = "db.txt"
 
@@ -24,23 +25,103 @@ MENU_ITEMS = {
     EXIT_ITEM: "Выйти из программы"
 }
 
-def print_all_tasks_to_console(tasks):
+def validate_due_date_content(date_content_str):
+    if not date_content_str:
+        return ""
+    try:
+        datetime.strptime(date_content_str, '%d.%m.%Y %H:%M')
+        return date_content_str
+    except ValueError:
+        return False
+
+class Task:
+    def __init__(self, task_id, description, due_date_str, creation_date, status):
+        self._task_id = str(task_id)
+        self.description = description
+        self.due_date_str = due_date_str
+
+        if isinstance(creation_date, datetime):
+            self._creation_date = creation_date
+        elif isinstance(creation_date, str):
+            self._creation_date = datetime.strptime(creation_date, '%Y-%m-%d %H:%M:%S.%f')
+        else:
+            self._creation_date = datetime.now()
+            print(f"Предупреждение: Некорректный тип creation_date для задачи {self._task_id}, используется текущее время.")
+        self.status = status
+
+    @property
+    def task_id(self):
+        return self._task_id
+
+    @property
+    def creation_date(self):
+        return self._creation_date
+
+    @property
+    def due_date(self):
+        if self.due_date_str and self.due_date_str.startswith("[") and self.due_date_str.endswith("]"):
+            date_content = self.due_date_str[1:-1].strip()
+            if not date_content:
+                return None
+            return datetime.strptime(date_content, '%d.%m.%Y %H:%M')
+        return None
+
+    @property
+    def is_overdue(self):
+        if self.status == STATUS_ACTIVE:
+            parsed_due_date = self.due_date
+            if parsed_due_date:
+                return datetime.now() > parsed_due_date
+        return False
+
+    def to_db_string(self):
+        return SEPARATOR.join([
+            self._task_id,
+            self.description,
+            self.due_date_str,
+            self._creation_date.strftime('%Y-%m-%d %H:%M:%S.%f'),
+            self.status
+        ])
+
+    @classmethod
+    def from_db_parts(cls, parts):
+        if len(parts) == 5:
+            task_id, description, due_date_str, creation_date_str, status = parts
+            creation_dt = datetime.strptime(creation_date_str, '%Y-%m-%d %H:%M:%S.%f')
+            if status not in [STATUS_ACTIVE, STATUS_DONE]:
+                print(f"Предупреждение: Некорректный статус '{status}' для задачи {task_id}, пропускаем.")
+                return None
+            return cls(task_id, description, due_date_str, creation_dt, status)
+        return None
+
+    def to_display_string(self):
+        status_symbol = "✕" if self.status == STATUS_ACTIVE else "✓"
+        
+        overdue_marker = ""
+        if self.is_overdue: 
+            overdue_marker = " (просрочено)"
+
+        creation_date_str_formatted = self._creation_date.strftime('%d.%m.%Y %H:%M')
+        due_date_display = self.due_date_str
+
+        return f"{status_symbol}{overdue_marker} {self.description} {due_date_display} (Создана: {creation_date_str_formatted})"
+
+def print_all_tasks_to_console(tasks_display_strings):
     counter = 1
-    if not tasks:
+    if not tasks_display_strings:
         print("Список задач пуст.")
         return
-    for task_info in tasks:
-        print(str(counter) + ": " + task_info)
+    for task_str in tasks_display_strings:
+        print(str(counter) + ": " + task_str)
         counter += 1
 
 def read_from_db():
-    try:
-        with open(DB_FILE_PATH, "r", encoding="utf8") as file_object:
-            file_content = file_object.read()
-        return file_content if file_content else ""
-    except FileNotFoundError:
+    if not os.path.exists(DB_FILE_PATH):
         print(f"Файл {DB_FILE_PATH} не найден. Будет создан новый при добавлении задачи.")
         return ""
+    with open(DB_FILE_PATH, "r", encoding="utf8") as file_object:
+        file_content = file_object.read()
+    return file_content if file_content else ""
 
 def append_new_line_to_db(new_line):
     current_content = read_from_db()
@@ -56,219 +137,227 @@ def deserialize_tasks_from_db(raw_content):
     if not raw_content:
         return []
     lines = raw_content.strip().splitlines()
-    tasks = [line.split(SEPARATOR) for line in lines if line]
-
-    validated_tasks = []
-    for task in tasks:
-        if len(task) == 5:
-            validated_tasks.append(task)
+    task_objects = []
+    for line in lines:
+        if not line.strip():
+            continue
+        parts = line.split(SEPARATOR)
+        if len(parts) == 5:
+            task_obj = Task.from_db_parts(parts)
+            if task_obj:
+                task_objects.append(task_obj)
         else:
-            print(f"Предупреждение: Пропущена некорректная строка в базе данных: {SEPARATOR.join(task)}")
-    return validated_tasks
+            print(f"Предупреждение: Пропущена некорректная строка в базе данных: {line}")
+    return task_objects
 
+def prepare_tasks_list_to_output(task_objects_list):
+    return [task.to_display_string() for task in task_objects_list]
 
-def prepare_tasks_list_to_output(raw_tasks_list):
-    tasks = []
-    for task_info in raw_tasks_list:
-        status_symbol = "✓" if task_info[4] == STATUS_ACTIVE else "✕"
-        try:
-            creation_date = datetime.strptime(task_info[3].split('.')[0], '%Y-%m-%d %H:%M:%S')
-            creation_date_str = creation_date.strftime('%d.%m.%Y %H:%M')
-        except ValueError:
-             creation_date_str = task_info[3]
+def prepare_new_task_to_save(description_val, validated_due_date_content):
+    task_id_val = uuid.uuid4()
+    task_date_created_val = datetime.now()
+    due_date_str_val = f"[{validated_due_date_content}]"
+    new_task_obj = Task(
+        task_id=task_id_val,
+        description=description_val,
+        due_date_str=due_date_str_val,
+        creation_date=task_date_created_val,
+        status=STATUS_ACTIVE
+    )
+    return new_task_obj.to_db_string()
 
-        task = f"{status_symbol} {task_info[1]} {task_info[2]} (Создана: {creation_date_str})"
-        tasks.append(task)
-    return tasks
-
-def serialize_task_for_db(task_data):
-    return SEPARATOR.join([task_data[0], task_data[1], task_data[2], task_data[3], task_data[4]])
-
-def prepare_new_task_to_save(task_info):
-    task_id = uuid.uuid4()
-    task_date_created = datetime.now()
-    task_to_save = serialize_task_for_db([str(task_id), task_info[0], "["+task_info[1]+"]", str(task_date_created), STATUS_ACTIVE])
-    return task_to_save
-
-def get_all_tasks(to_show=None):
+def get_all_tasks(to_show_status=None):
     all_tasks_content = read_from_db()
-    raw_tasks = deserialize_tasks_from_db(all_tasks_content)
-
-    final_tasks = []
-    if to_show:
-        final_tasks = [raw_task for raw_task in raw_tasks if raw_task[4] == to_show]
+    all_task_objects = deserialize_tasks_from_db(all_tasks_content)
+    final_task_objects = []
+    if to_show_status:
+        final_task_objects = [task_obj for task_obj in all_task_objects if task_obj.status == to_show_status]
     else:
-        final_tasks = raw_tasks
-
-    tasks_list_to_print = prepare_tasks_list_to_output(final_tasks)
-    return tasks_list_to_print, final_tasks
+        final_task_objects = all_task_objects
+    tasks_list_to_print = prepare_tasks_list_to_output(final_task_objects)
+    return tasks_list_to_print, final_task_objects
 
 def get_active_tasks_raw():
     all_tasks_content = read_from_db()
-    raw_tasks = deserialize_tasks_from_db(all_tasks_content)
-    active_tasks = [task for task in raw_tasks if task[4] == STATUS_ACTIVE]
-    return active_tasks
+    all_task_objects = deserialize_tasks_from_db(all_tasks_content)
+    active_task_objects = [task_obj for task_obj in all_task_objects if task_obj.status == STATUS_ACTIVE]
+    return active_task_objects
 
 def parse_new_task_input(raw_data):
-    splitted_params = raw_data.split("[")
+    splitted_params = raw_data.split("[", 1)
     task_description = splitted_params[0].strip()
-    task_due_date = ""
-
+    task_due_date_content = ""
     if len(splitted_params) > 1:
-        task_due_date = "[".join(splitted_params[1:]).strip()
-        if task_due_date.endswith("]"):
-            task_due_date = task_due_date[:-1].strip()
-
-    return [task_description, task_due_date]
+        due_part = splitted_params[1]
+        if ']' in due_part:
+            task_due_date_content = due_part.split("]", 1)[0].strip()
+    return [task_description, task_due_date_content]
 
 def action_new_task():
     print("#------------------#")
-    print("Введите параметры новой задачи (описание [дата исполнения]) или 0, чтобы вернуться:")
-    new_task_info = input()
+    print("Введите параметры новой задачи (описание [дата исполнения ДД.ММ.ГГГГ ЧЧ:ММ]) или 0, чтобы вернуться:")
+    new_task_info_str = input()
 
-    if new_task_info == "0": return
+    if new_task_info_str == "0": return
 
-    if not new_task_info.strip():
+    if not new_task_info_str.strip():
         print("Ошибка: Описание задачи не может быть пустым.")
+        input("Нажмите Enter для возврата в меню...")
         return
 
-    task_data = parse_new_task_input(new_task_info)
-    task_to_save = prepare_new_task_to_save(task_data)
-    append_new_line_to_db(task_to_save)
+    task_data_parts = parse_new_task_input(new_task_info_str)
+    description_val = task_data_parts[0]
+    due_date_content_input = task_data_parts[1]
+
+    if not description_val: 
+        print("Ошибка: Описание задачи не может быть пустым.")
+        input("Нажмите Enter для возврата в меню...")
+        return
+
+    validated_due_date_content = validate_due_date_content(due_date_content_input)
+    if due_date_content_input and validated_due_date_content is False:
+        print(f"Ошибка: Неверный формат даты исполнения '{due_date_content_input}'. "
+              f"Используйте формат ДД.ММ.ГГГГ ЧЧ:ММ или оставьте поле пустым.")
+        input("Нажмите Enter для возврата в меню...")
+        return
+
+    task_to_save_str = prepare_new_task_to_save(description_val, validated_due_date_content)
+    append_new_line_to_db(task_to_save_str)
     print("Задача успешно добавлена!")
+    input("Нажмите Enter для возврата в меню...")
 
 def action_complete_task():
     print("#------------------#")
-    active_tasks_raw = get_active_tasks_raw()
-
-    if not active_tasks_raw:
+    active_task_objects_list = get_active_tasks_raw()
+    if not active_task_objects_list:
         print("Нет активных задач для завершения.")
+        input("Нажмите Enter для возврата в меню...")
         return
 
     print("Активные задачи:")
-    print_all_tasks_to_console(prepare_tasks_list_to_output(active_tasks_raw))
+    print_all_tasks_to_console(prepare_tasks_list_to_output(active_task_objects_list))
     print("\nВведите номер задачи для завершения или 0, чтобы вернуться:")
 
-    try:
-        task_number_str = input()
-        if task_number_str == "0": return
-        task_number = int(task_number_str)
+    task_number_str = input()
+    if task_number_str == "0": return
+    task_number = int(task_number_str)
 
-        if task_number < 1 or task_number > len(active_tasks_raw):
-            print("Ошибка: Неверный номер задачи.")
-            return
+    if task_number < 1 or task_number > len(active_task_objects_list):
+        print("Ошибка: Неверный номер задачи.")
+        input("Нажмите Enter для возврата в меню...")
+        return
 
-        task_to_complete_id = active_tasks_raw[task_number - 1][0]
+    task_to_complete_id_val = active_task_objects_list[task_number - 1].task_id
+    all_tasks_content = read_from_db()
+    all_task_objects_from_db = deserialize_tasks_from_db(all_tasks_content)
+    updated_task_db_strings = []
+    found = False
+    for task_obj in all_task_objects_from_db:
+        if task_obj.task_id == task_to_complete_id_val:
+            task_obj.status = STATUS_DONE
+            found = True
+        updated_task_db_strings.append(task_obj.to_db_string())
 
-        all_tasks_content = read_from_db()
-        all_tasks_raw = deserialize_tasks_from_db(all_tasks_content)
-
-        tasks_output = []
-        found = False
-        for task in all_tasks_raw:
-            if task[0] == task_to_complete_id:
-                task[4] = STATUS_DONE
-                found = True
-            tasks_output.append(serialize_task_for_db(task))
-
-        if found:
-            final_string_to_save = "\n".join(tasks_output)
-            rewrite_db(final_string_to_save)
-            print(f"Задача номер {task_number} успешно завершена.")
-        else:
-            print("Ошибка: Не удалось найти задачу для завершения (возможно, база данных изменилась).")
-
-    except ValueError:
-        print("Ошибка: Введите числовое значение номера задачи.")
-    except Exception as e:
-        print(f"Произошла ошибка: {e}")
-
+    if found:
+        final_string_to_save = "\n".join(updated_task_db_strings)
+        rewrite_db(final_string_to_save)
+        print(f"Задача номер {task_number} успешно завершена.")
+    else:
+        print("Ошибка: Не удалось найти задачу для завершения (возможно, база данных изменилась).")
     input("Нажмите Enter для возврата в меню...")
-
 
 def action_change_task_params():
     print("#------------------#")
-    active_tasks_raw = get_active_tasks_raw()
-
-    if not active_tasks_raw:
+    active_task_objects_list = get_active_tasks_raw()
+    if not active_task_objects_list:
         print("Нет активных задач для изменения.")
         input("Нажмите Enter для возврата в меню...")
         return
 
     print("Активные задачи:")
-    print_all_tasks_to_console(prepare_tasks_list_to_output(active_tasks_raw))
+    print_all_tasks_to_console(prepare_tasks_list_to_output(active_task_objects_list))
     print("\nВведите номер задачи для изменения её параметров или 0, чтобы вернуться:")
 
-    try:
-        task_number_str = input()
-        if task_number_str == "0": return
-        task_number = int(task_number_str)
+    task_number_str = input()
+    if task_number_str == "0": return
+    task_number = int(task_number_str)
 
-        if task_number < 1 or task_number > len(active_tasks_raw):
-            print("Ошибка: Неверный номер задачи.")
-            input("Нажмите Enter для возврата в меню...")
-            return
+    if task_number < 1 or task_number > len(active_task_objects_list):
+        print("Ошибка: Неверный номер задачи.")
+        input("Нажмите Enter для возврата в меню...")
+        return
 
-        task_to_change_index = task_number - 1
-        task_to_change_id = active_tasks_raw[task_to_change_index][0]
-        current_description = active_tasks_raw[task_to_change_index][1]
-        current_due_date_content = active_tasks_raw[task_to_change_index][2].strip('[]')
-        current_due_date_str_with_brackets = active_tasks_raw[task_to_change_index][2]
+    task_to_change_obj = active_task_objects_list[task_number - 1]
+    task_to_change_id_val = task_to_change_obj.task_id
+    current_description = task_to_change_obj.description
+    current_due_date_content = task_to_change_obj.due_date_str[1:-1] if len(task_to_change_obj.due_date_str) > 1 else ""
 
+    print(f"\nИзменение задачи №{task_number}:")
+    print(f"Текущее описание: {current_description}")
+    print(f"Текущая дата исполнения: {current_due_date_content}")
+    print("Введите новое описание (или нажмите Enter, чтобы оставить текущее):")
+    new_description_input = input().strip()
+    print("Введите новую дату исполнения (формат ДД.ММ.ГГГГ ЧЧ:ММ; Enter - оставить; '-' - удалить):")
+    new_due_date_content_user_input = input().strip()
 
-        print(f"\nИзменение задачи №{task_number}:")
-        print(f"Текущее описание: {current_description}")
-        print(f"Текущая дата исполнения: {current_due_date_content}")
+    final_description = new_description_input if new_description_input else current_description
+    if not final_description:
+        print("Ошибка: Описание задачи не может быть пустым. Изменения не сохранены.")
+        input("Нажмите Enter для возврата в меню...")
+        return
 
-        print("Введите новое описание (или нажмите Enter, чтобы оставить текущее):")
-        new_description_input = input().strip()
-        print("Введите новую дату исполнения (или нажмите Enter, чтобы оставить текущую):")
-        new_due_date_input = input().strip()
+    description_changed = final_description != current_description
+    due_date_changed = False
+    final_due_date_str_with_brackets = task_to_change_obj.due_date_str
+    due_date_error_occurred = False
 
-        description_changed = bool(new_description_input)
-        due_date_changed = bool(new_due_date_input)
-
-        if not description_changed and not due_date_changed:
-             if new_due_date_input == '' and current_due_date_content != '':
-                 due_date_changed = True
-             else:
-                 print("Никаких изменений не внесено.")
-                 input("Нажмите Enter для возврата в меню...")
-                 return
-
-        final_description = new_description_input if description_changed else current_description
-        final_due_date_str = ""
-        if due_date_changed:
-            final_due_date_str = f"[{new_due_date_input}]"
+    if new_due_date_content_user_input == '-':
+        if task_to_change_obj.due_date_str != "[]":
+            due_date_changed = True
+            final_due_date_str_with_brackets = "[]"
+    elif new_due_date_content_user_input:
+        validated_new_content = validate_due_date_content(new_due_date_content_user_input)
+        if validated_new_content is False:
+            print(f"Ошибка: Неверный формат новой даты исполнения '{new_due_date_content_user_input}'. "
+                  f"Дата не будет изменена.")
+            due_date_error_occurred = True
         else:
-            final_due_date_str = current_due_date_str_with_brackets
+            proposed_due_date_str = f"[{validated_new_content}]"
+            if proposed_due_date_str != task_to_change_obj.due_date_str:
+                due_date_changed = True
+                final_due_date_str_with_brackets = proposed_due_date_str
+    elif not new_due_date_content_user_input:
+        if task_to_change_obj.due_date_str != "[]":
+            due_date_changed = True
+            final_due_date_str_with_brackets = "[]"
 
-        all_tasks_content = read_from_db()
-        all_tasks_raw = deserialize_tasks_from_db(all_tasks_content)
-
-        tasks_output = []
-        found_and_updated = False
-        for task in all_tasks_raw:
-            if task[0] == task_to_change_id:
-                task[1] = final_description
-                task[2] = final_due_date_str
-                found_and_updated = True
-            tasks_output.append(serialize_task_for_db(task))
-
-        if found_and_updated:
-            final_string_to_save = "\n".join(tasks_output)
-            rewrite_db(final_string_to_save)
-            print(f"Параметры задачи номер {task_number} успешно изменены.")
+    if not description_changed and not due_date_changed:
+        if due_date_error_occurred:
+            print("Никаких других изменений не внесено.")
         else:
-             print("Ошибка: Не удалось найти задачу для изменения (возможно, база данных изменилась).")
+            print("Никаких изменений не внесено.")
+        input("Нажмите Enter для возврата в меню...")
+        return
 
-    except ValueError:
-        print("Ошибка: Введите числовое значение номера задачи.")
-    except Exception as e:
-        print(f"Произошла непредвиденная ошибка: {e}")
+    all_tasks_content = read_from_db()
+    all_task_objects_from_db = deserialize_tasks_from_db(all_tasks_content)
+    updated_task_db_strings = []
+    found_and_updated = False
+    for task_obj_from_db in all_task_objects_from_db:
+        if task_obj_from_db.task_id == task_to_change_id_val:
+            task_obj_from_db.description = final_description
+            if due_date_changed: 
+                task_obj_from_db.due_date_str = final_due_date_str_with_brackets
+            found_and_updated = True
+        updated_task_db_strings.append(task_obj_from_db.to_db_string())
 
+    if found_and_updated:
+        final_string_to_save = "\n".join(updated_task_db_strings)
+        rewrite_db(final_string_to_save)
+        print(f"Параметры задачи номер {task_number} успешно изменены.")
+    else:
+        print("Ошибка: Не удалось найти задачу для изменения (возможно, база данных изменилась).")
     input("Нажмите Enter для возврата в меню...")
-
 
 def show_completed_tasks():
     print("#------------------#")
@@ -281,20 +370,19 @@ def show_completed_tasks():
 def erase_completed_tasks():
     print("#------------------#")
     print("Очищаем базу от завершённых задач...")
-
     all_tasks_content = read_from_db()
-    all_tasks_raw = deserialize_tasks_from_db(all_tasks_content)
-
-    active_tasks_to_keep = [serialize_task_for_db(task) for task in all_tasks_raw if task[4] == STATUS_ACTIVE]
-    removed_count = len(all_tasks_raw) - len(active_tasks_to_keep)
+    all_task_objects = deserialize_tasks_from_db(all_tasks_content)
+    active_tasks_to_keep_db_strings = [
+        task_obj.to_db_string() for task_obj in all_task_objects if task_obj.status == STATUS_ACTIVE
+    ]
+    removed_count = len(all_task_objects) - len(active_tasks_to_keep_db_strings)
 
     if removed_count > 0:
-        final_string_to_save = "\n".join(active_tasks_to_keep)
+        final_string_to_save = "\n".join(active_tasks_to_keep_db_strings)
         rewrite_db(final_string_to_save)
         print(f"Успешно удалено завершённых задач: {removed_count}")
     else:
         print("Нет завершённых задач для удаления.")
-
     print("#------------------#")
     input("Нажмите Enter для возврата в меню...")
 
@@ -305,14 +393,10 @@ def action_wipe_database():
     confirmation = input("Вы уверены, что хотите продолжить? (введите 'да' для подтверждения): ").lower()
 
     if confirmation == 'да':
-        try:
-            rewrite_db("")
-            print("База данных успешно очищена.")
-        except Exception as e:
-            print(f"Произошла ошибка при очистке базы данных: {e}")
+        rewrite_db("")
+        print("База данных успешно очищена.")
     else:
         print("Очистка базы данных отменена.")
-
     print("#------------------#")
     input("Нажмите Enter для возврата в меню...")
 
@@ -320,10 +404,9 @@ def show_main_menu():
     print("#------------------#")
     print("Выберите действие:")
     menu_text = ""
-    sorted_keys = sorted(MENU_ITEMS.keys(), key=lambda x: int(x) if x != '0' else float('inf'))
+    sorted_keys = sorted(MENU_ITEMS.keys(), key=lambda x: int(x) if x != EXIT_ITEM else float('inf'))
     for key in sorted_keys:
         menu_text = menu_text + key + " – " + MENU_ITEMS[key] + "\n"
-
     print(menu_text)
     print("Номер действия: ", end="")
     choice = input()
@@ -347,10 +430,9 @@ def show_main_menu():
         print("Неизвестная команда")
         input("Нажмите Enter для продолжения...")
 
-
 def main():
     while True:
-        tasks_list_to_print, _ = get_all_tasks(STATUS_ACTIVE)
+        tasks_list_to_print, _active_task_objects = get_all_tasks(STATUS_ACTIVE)
         print("\n#---------- АКТУАЛЬНЫЕ ЗАДАЧИ ----------#")
         print_all_tasks_to_console(tasks_list_to_print)
         show_main_menu()
